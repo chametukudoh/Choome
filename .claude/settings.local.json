@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /s /b)",
+      "Bash(dir:*)",
+      "Bash(powershell:*)",
+      "Bash(npm init:*)",
+      "Bash(xcopy:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tailwindcss:*)",
+      "Bash(del srcmain.ts srcpreload.ts srcrenderer.ts)",
+      "Bash(npm start)",
+      "Bash(npm uninstall:*)",
+      "Skill(playwright-skill:playwright-skill)",
+      "Skill(playwright-skill:playwright-skill:*)",
+      "Bash(node -e:*)",
+      "Bash(timeout /t 15 npm start)",
+      "Bash(more:*)",
+      "Bash(npx electron --version)",
+      "Bash(node_modules.binelectron test-desktop-capturer.js)",
+      "Bash(tasklist:*)",
+      "Bash(findstr:*)",
+      "Bash(taskkill:*)",
+      "Bash(node test-desktop-capturer.js:*)",
+      "Bash(npm run lint)",
+      "Bash(timeout /t 5)"
+    ]
+  }
+}
