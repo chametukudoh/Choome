@@ -90,3 +90,10 @@ typings/
 
 # Electron-Forge
 out/
+
+# Claude artifacts
+.claude.md
+
+# Local planning notes
+PLAN.md
+.cluad
