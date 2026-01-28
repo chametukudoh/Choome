@@ -55,6 +55,8 @@ export function useRecording(): UseRecordingReturn {
   const timerRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
   const pausedDurationRef = useRef<number>(0);
+  const webcamHiddenRef = useRef<boolean>(false);
+  const mainWindowBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -123,6 +125,28 @@ export function useRecording(): UseRecordingReturn {
     }
 
     try {
+      let resolvedDisplayId = selectedSource.display_id;
+      if (!resolvedDisplayId && selectedSource.id.startsWith('screen:')) {
+        const displays = await window.electronAPI?.getDisplays();
+        const match = selectedSource.name?.match(/Screen\\s+(\\d+)/i);
+        if (match && displays && displays[Number(match[1]) - 1]) {
+          resolvedDisplayId = String(displays[Number(match[1]) - 1].id);
+        }
+      }
+
+      const shouldHideWebcamWindow = includeWebcam && selectedSource.id.startsWith('screen:');
+      if (shouldHideWebcamWindow) {
+        if (resolvedDisplayId) {
+          const movedBounds = await window.electronAPI?.moveWindowOffDisplay(Number(resolvedDisplayId));
+          if (movedBounds) {
+            mainWindowBoundsRef.current = movedBounds;
+          }
+        }
+        await window.electronAPI?.setWebcamVisible(false);
+        await window.electronAPI?.closeWebcam();
+        webcamHiddenRef.current = true;
+      }
+
       const settings = await window.electronAPI?.getSettings();
       const frameRateSetting = settings?.frameRate ?? 60;
       const effectiveQuality = settings?.quality ?? quality;
@@ -158,8 +182,9 @@ export function useRecording(): UseRecordingReturn {
 
       if (includeWebcam) {
         try {
-          const overlayConfig = await window.electronAPI?.getWebcamOverlayConfig(selectedSource.display_id);
+          const overlayConfig = await window.electronAPI?.getWebcamOverlayConfig(resolvedDisplayId);
           const webcamShape = overlayConfig?.shape ?? settings?.webcam?.shape ?? 'circle';
+          const sourcePosition = settings?.webcam?.positionBySource?.[selectedSource.id];
           const persistedWebcamId = selectedWebcamId || settings?.webcam?.deviceId || window.localStorage.getItem('choome:webcamDeviceId');
           const webcamConstraints: MediaStreamConstraints = {
             video: persistedWebcamId
@@ -204,6 +229,16 @@ export function useRecording(): UseRecordingReturn {
           const canvasHeight = screenSettings.height || 1080;
           const frameRate = screenSettings.frameRate || frameRateSetting || 30;
 
+          const adjustedOverlayConfig = overlayConfig && overlayConfig.displayWidth && overlayConfig.displayHeight
+            ? {
+                ...overlayConfig,
+                x: Math.round(overlayConfig.x * (canvasWidth / overlayConfig.displayWidth)),
+                y: Math.round(overlayConfig.y * (canvasHeight / overlayConfig.displayHeight)),
+                width: Math.max(1, Math.round(overlayConfig.width * (canvasWidth / overlayConfig.displayWidth))),
+                height: Math.max(1, Math.round(overlayConfig.height * (canvasHeight / overlayConfig.displayHeight))),
+              }
+            : overlayConfig;
+
           const canvas = document.createElement('canvas');
           canvas.width = canvasWidth;
           canvas.height = canvasHeight;
@@ -221,6 +256,32 @@ export function useRecording(): UseRecordingReturn {
             ctx.arcTo(x, y + height, x, y, r);
             ctx.arcTo(x, y, x + width, y, r);
             ctx.closePath();
+          };
+
+          const drawCoverVideo = (video: HTMLVideoElement, dx: number, dy: number, dWidth: number, dHeight: number) => {
+            const vWidth = video.videoWidth;
+            const vHeight = video.videoHeight;
+            if (!vWidth || !vHeight) {
+              ctx.drawImage(video, dx, dy, dWidth, dHeight);
+              return;
+            }
+
+            const videoAspect = vWidth / vHeight;
+            const targetAspect = dWidth / dHeight;
+            let sx = 0;
+            let sy = 0;
+            let sWidth = vWidth;
+            let sHeight = vHeight;
+
+            if (videoAspect > targetAspect) {
+              sWidth = Math.round(vHeight * targetAspect);
+              sx = Math.round((vWidth - sWidth) / 2);
+            } else if (videoAspect < targetAspect) {
+              sHeight = Math.round(vWidth / targetAspect);
+              sy = Math.round((vHeight - sHeight) / 2);
+            }
+
+            ctx.drawImage(video, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight);
           };
 
           const drawFrame = () => {
@@ -247,14 +308,22 @@ export function useRecording(): UseRecordingReturn {
               let pipX = canvasWidth - pipWidth - margin;
               let pipY = canvasHeight - pipHeight - margin;
 
-              if (overlayConfig && overlayConfig.width > 0 && overlayConfig.height > 0) {
-                pipWidth = Math.min(overlayConfig.width, canvasWidth);
-                pipHeight = Math.min(overlayConfig.height, canvasHeight);
-                pipX = Math.min(Math.max(overlayConfig.x, 0), canvasWidth - pipWidth);
-                pipY = Math.min(Math.max(overlayConfig.y, 0), canvasHeight - pipHeight);
+              if (adjustedOverlayConfig && adjustedOverlayConfig.width > 0 && adjustedOverlayConfig.height > 0) {
+                pipWidth = Math.min(adjustedOverlayConfig.width, canvasWidth);
+                pipHeight = Math.min(adjustedOverlayConfig.height, canvasHeight);
+                pipX = Math.min(Math.max(adjustedOverlayConfig.x, 0), canvasWidth - pipWidth);
+                pipY = Math.min(Math.max(adjustedOverlayConfig.y, 0), canvasHeight - pipHeight);
+              }
+
+              if (sourcePosition) {
+                const maxX = Math.max(0, canvasWidth - pipWidth);
+                const maxY = Math.max(0, canvasHeight - pipHeight);
+                pipX = Math.min(Math.max(Math.round(sourcePosition.x * maxX), 0), maxX);
+                pipY = Math.min(Math.max(Math.round(sourcePosition.y * maxY), 0), maxY);
               }
               const borderWidth = Math.max(2, Math.round(canvasWidth * 0.003));
               const cornerRadius = Math.round(Math.min(pipWidth, pipHeight) * 0.18);
+              const squareRadius = Math.max(6, Math.round(cornerRadius * 0.45));
 
               if (webcamShape === 'circle') {
                 const diameter = Math.min(pipWidth, pipHeight);
@@ -271,14 +340,12 @@ export function useRecording(): UseRecordingReturn {
                 ctx.arc(pipX + radius, pipY + radius, radius, 0, Math.PI * 2);
                 ctx.closePath();
               } else if (webcamShape === 'square') {
-                ctx.beginPath();
-                ctx.rect(pipX, pipY, pipWidth, pipHeight);
-                ctx.closePath();
+                drawRoundedRect(pipX, pipY, pipWidth, pipHeight, squareRadius);
               } else {
                 drawRoundedRect(pipX, pipY, pipWidth, pipHeight, cornerRadius);
               }
               ctx.clip();
-              ctx.drawImage(webcamVideo, pipX, pipY, pipWidth, pipHeight);
+              drawCoverVideo(webcamVideo, pipX, pipY, pipWidth, pipHeight);
               ctx.restore();
 
               ctx.save();
@@ -290,9 +357,7 @@ export function useRecording(): UseRecordingReturn {
                 ctx.arc(pipX + radius, pipY + radius, radius, 0, Math.PI * 2);
                 ctx.closePath();
               } else if (webcamShape === 'square') {
-                ctx.beginPath();
-                ctx.rect(pipX, pipY, pipWidth, pipHeight);
-                ctx.closePath();
+                drawRoundedRect(pipX, pipY, pipWidth, pipHeight, squareRadius);
               } else {
                 drawRoundedRect(pipX, pipY, pipWidth, pipHeight, cornerRadius);
               }
@@ -521,6 +586,15 @@ export function useRecording(): UseRecordingReturn {
         title: 'Recording failed',
         message: 'Please check permissions and try again.',
       });
+      if (webcamHiddenRef.current) {
+        await window.electronAPI?.openWebcam();
+        await window.electronAPI?.setWebcamVisible(true);
+        webcamHiddenRef.current = false;
+      }
+      if (mainWindowBoundsRef.current) {
+        await window.electronAPI?.restoreWindowBounds(mainWindowBoundsRef.current);
+        mainWindowBoundsRef.current = null;
+      }
       setStatus('idle');
     }
   }, [
@@ -552,6 +626,15 @@ export function useRecording(): UseRecordingReturn {
       setStatus('processing');
 
       mediaRecorderRef.current.onstop = async () => {
+        if (webcamHiddenRef.current) {
+          await window.electronAPI?.openWebcam();
+          await window.electronAPI?.setWebcamVisible(true);
+          webcamHiddenRef.current = false;
+        }
+        if (mainWindowBoundsRef.current) {
+          await window.electronAPI?.restoreWindowBounds(mainWindowBoundsRef.current);
+          mainWindowBoundsRef.current = null;
+        }
         // Stop timer
         if (timerRef.current) {
           clearInterval(timerRef.current);
