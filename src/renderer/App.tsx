@@ -176,6 +176,8 @@ function RecordPage() {
   const [dragPosition, setDragPosition] = useState<{ x: number; y: number } | null>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const pipRef = useRef<HTMLDivElement>(null);
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
+  const previewStreamRef = useRef<MediaStream | null>(null);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const dragPositionRef = useRef<{ x: number; y: number } | null>(null);
   const {
@@ -212,11 +214,71 @@ function RecordPage() {
 
   useEffect(() => {
     if (!selectedSource) return;
+    setImageAspect(null);
     window.electronAPI?.getSettings().then((settings) => {
       if (settings?.webcam) {
         setWebcamSettings(settings.webcam);
       }
     });
+  }, [selectedSource?.id]);
+
+  useEffect(() => {
+    const videoElement = previewVideoRef.current;
+    const stopStream = () => {
+      if (previewStreamRef.current) {
+        previewStreamRef.current.getTracks().forEach((track) => track.stop());
+        previewStreamRef.current = null;
+      }
+      if (videoElement) {
+        videoElement.srcObject = null;
+      }
+    };
+
+    if (!selectedSource?.id) {
+      stopStream();
+      return;
+    }
+
+    let cancelled = false;
+    const startPreview = async () => {
+      try {
+        const previewStream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            // @ts-expect-error - Electron-specific constraint
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: selectedSource.id,
+              maxWidth: 3840,
+              maxHeight: 2160,
+            },
+          },
+        });
+
+        if (cancelled) {
+          previewStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        previewStreamRef.current = previewStream;
+        if (videoElement) {
+          videoElement.srcObject = previewStream;
+          videoElement.play().catch((error) => {
+            console.warn('Preview video play was blocked:', error);
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to start live preview stream:', error);
+        stopStream();
+      }
+    };
+
+    startPreview();
+
+    return () => {
+      cancelled = true;
+      stopStream();
+    };
   }, [selectedSource?.id]);
 
 
@@ -260,7 +322,7 @@ function RecordPage() {
   const webcamSize = CAMERA_SIZE_PRESETS[webcamSizeKey];
 
   const imageRect = useMemo(() => {
-    if (!selectedSource?.thumbnail || !imageAspect || !previewSize.width || !previewSize.height) {
+    if (!selectedSource || !imageAspect || !previewSize.width || !previewSize.height) {
       return { x: 0, y: 0, width: previewSize.width, height: previewSize.height };
     }
     const containerAspect = previewSize.width / previewSize.height;
@@ -272,9 +334,9 @@ function RecordPage() {
     const height = previewSize.height;
     const width = height * imageAspect;
     return { x: (previewSize.width - width) / 2, y: 0, width, height };
-  }, [imageAspect, previewSize.width, previewSize.height, selectedSource?.thumbnail]);
+  }, [imageAspect, previewSize.width, previewSize.height, selectedSource]);
 
-  const previewBaseRect = selectedSource?.thumbnail
+  const previewBaseRect = selectedSource
     ? imageRect
     : { x: 0, y: 0, width: previewSize.width, height: previewSize.height };
 
@@ -457,15 +519,16 @@ function RecordPage() {
         }`}
       >
         <div ref={previewRef} className="relative w-full h-full">
-          {selectedSource?.thumbnail ? (
-            <img
-              src={selectedSource.thumbnail}
-              alt={selectedSource.name}
+          {selectedSource ? (
+            <video
+              ref={previewVideoRef}
+              muted
+              playsInline
               className="w-full h-full object-contain bg-dark-950"
-              onLoad={(event) => {
+              onLoadedMetadata={(event) => {
                 const target = event.currentTarget;
-                if (target.naturalWidth && target.naturalHeight) {
-                  setImageAspect(target.naturalWidth / target.naturalHeight);
+                if (target.videoWidth && target.videoHeight) {
+                  setImageAspect(target.videoWidth / target.videoHeight);
                 }
               }}
             />
@@ -493,12 +556,12 @@ function RecordPage() {
               </div>
             </div>
           )}
-          {selectedSource?.thumbnail && isRecording && (
+          {selectedSource && isRecording && (
             <div className="absolute top-4 left-4 flex items-center gap-2 bg-dark-900/80 px-3 py-1 rounded-full">
               <RecordingTimer />
             </div>
           )}
-          {selectedSource?.thumbnail && !isBusy && (
+          {selectedSource && !isBusy && (
             <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center">
               <span className="bg-primary-600 text-white px-4 py-2 rounded-lg font-medium">
                 Change Source

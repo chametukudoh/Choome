@@ -52,6 +52,7 @@ export function useRecording(): UseRecordingReturn {
   const animationFrameRef = useRef<number | null>(null);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
   const webcamVideoRef = useRef<HTMLVideoElement | null>(null);
+  const hiddenVideoContainerRef = useRef<HTMLDivElement | null>(null);
   const timerRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
   const pausedDurationRef = useRef<number>(0);
@@ -100,6 +101,10 @@ export function useRecording(): UseRecordingReturn {
       if (audioContextRef.current) {
         audioContextRef.current.close();
         audioContextRef.current = null;
+      }
+      if (hiddenVideoContainerRef.current) {
+        hiddenVideoContainerRef.current.remove();
+        hiddenVideoContainerRef.current = null;
       }
       if (recoveryIdRef.current) {
         window.electronAPI.discardRecordingRecovery(recoveryIdRef.current);
@@ -200,14 +205,40 @@ export function useRecording(): UseRecordingReturn {
           const webcamShape = overlayConfig?.shape ?? settings?.webcam?.shape ?? 'circle';
           const sourcePosition = settings?.webcam?.positionBySource?.[selectedSource.id];
           const persistedWebcamId = selectedWebcamId || settings?.webcam?.deviceId || window.localStorage.getItem('choome:webcamDeviceId');
-          const webcamConstraints: MediaStreamConstraints = {
-            video: persistedWebcamId
-              ? { deviceId: { exact: persistedWebcamId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-              : { width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: false,
+          const webcamConstraintOptions: MediaStreamConstraints[] = [
+            {
+              video: persistedWebcamId
+                ? { deviceId: { exact: persistedWebcamId }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
+                : { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+              audio: false,
+            },
+            {
+              video: persistedWebcamId
+                ? { deviceId: { exact: persistedWebcamId }, width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 30 } }
+                : { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 30 } },
+              audio: false,
+            },
+            {
+              video: persistedWebcamId
+                ? { deviceId: { exact: persistedWebcamId } }
+                : true,
+              audio: false,
+            },
+          ];
+
+          const getWebcamStream = async () => {
+            let lastError: unknown = null;
+            for (const constraints of webcamConstraintOptions) {
+              try {
+                return await navigator.mediaDevices.getUserMedia(constraints);
+              } catch (error) {
+                lastError = error;
+              }
+            }
+            throw lastError;
           };
 
-          const webcamStream = await navigator.mediaDevices.getUserMedia(webcamConstraints);
+          const webcamStream = await getWebcamStream();
           webcamStreamRef.current = webcamStream;
 
           const screenVideo = document.createElement('video');
@@ -222,6 +253,17 @@ export function useRecording(): UseRecordingReturn {
           webcamVideo.srcObject = webcamStream;
           webcamVideoRef.current = webcamVideo;
 
+          if (hiddenVideoContainerRef.current) {
+            hiddenVideoContainerRef.current.remove();
+            hiddenVideoContainerRef.current = null;
+          }
+          const hiddenContainer = document.createElement('div');
+          hiddenContainer.style.cssText =
+            'position:fixed;left:-10000px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+          hiddenContainer.append(screenVideo, webcamVideo);
+          document.body.appendChild(hiddenContainer);
+          hiddenVideoContainerRef.current = hiddenContainer;
+
           const ensureVideoReady = async (video: HTMLVideoElement) => {
             if (video.readyState >= 2) return;
             await new Promise<void>((resolve) => {
@@ -232,8 +274,12 @@ export function useRecording(): UseRecordingReturn {
           };
 
           await Promise.all([
-            screenVideo.play().catch(() => {}),
-            webcamVideo.play().catch(() => {}),
+            screenVideo.play().catch((error) => {
+              console.warn('Screen video play was blocked:', error);
+            }),
+            webcamVideo.play().catch((error) => {
+              console.warn('Webcam video play was blocked:', error);
+            }),
             ensureVideoReady(screenVideo),
             ensureVideoReady(webcamVideo),
           ]);
@@ -259,6 +305,46 @@ export function useRecording(): UseRecordingReturn {
           const ctx = canvas.getContext('2d');
           if (!ctx) {
             throw new Error('Failed to create canvas context for webcam overlay');
+          }
+
+          let lastWebcamTime = -1;
+          let lastWebcamFrameAt = performance.now();
+          let webcamRefreshInFlight = false;
+          let webcamRefreshCooldownUntil = 0;
+
+          const refreshWebcamStream = async () => {
+            const now = performance.now();
+            if (webcamRefreshInFlight || now < webcamRefreshCooldownUntil) return;
+            webcamRefreshInFlight = true;
+            try {
+              const newStream = await getWebcamStream();
+              const oldStream = webcamStreamRef.current;
+              webcamStreamRef.current = newStream;
+              const newTrack = newStream.getVideoTracks()[0];
+              if (newTrack) {
+                newTrack.addEventListener('ended', refreshWebcamStream);
+                newTrack.addEventListener('mute', refreshWebcamStream);
+              }
+              webcamVideo.srcObject = newStream;
+              await webcamVideo.play().catch((error) => {
+                console.warn('Webcam video play was blocked after refresh:', error);
+              });
+              if (oldStream) {
+                oldStream.getTracks().forEach((track) => track.stop());
+              }
+            } catch (error) {
+              console.warn('Failed to refresh webcam stream:', error);
+            } finally {
+              lastWebcamFrameAt = performance.now();
+              webcamRefreshCooldownUntil = lastWebcamFrameAt + 5000;
+              webcamRefreshInFlight = false;
+            }
+          };
+
+          const initialTrack = webcamStream.getVideoTracks()[0];
+          if (initialTrack) {
+            initialTrack.addEventListener('ended', refreshWebcamStream);
+            initialTrack.addEventListener('mute', refreshWebcamStream);
           }
 
           const drawRoundedRect = (x: number, y: number, width: number, height: number, radius: number) => {
@@ -305,6 +391,13 @@ export function useRecording(): UseRecordingReturn {
             }
 
             if (webcamVideo.readyState >= 2) {
+              if (webcamVideo.currentTime !== lastWebcamTime) {
+                lastWebcamTime = webcamVideo.currentTime;
+                lastWebcamFrameAt = performance.now();
+              } else if (performance.now() - lastWebcamFrameAt > 2000) {
+                refreshWebcamStream();
+              }
+
               const margin = Math.round(Math.min(canvasWidth, canvasHeight) * 0.02);
               const targetWidth = Math.round(canvasWidth * 0.22);
               const webcamAspect = webcamVideo.videoWidth && webcamVideo.videoHeight
@@ -611,6 +704,10 @@ export function useRecording(): UseRecordingReturn {
         await window.electronAPI?.restoreWindowBounds?.(mainWindowBoundsRef.current);
         mainWindowBoundsRef.current = null;
       }
+      if (hiddenVideoContainerRef.current) {
+        hiddenVideoContainerRef.current.remove();
+        hiddenVideoContainerRef.current = null;
+      }
       setStatus('idle');
     }
   }, [
@@ -694,6 +791,10 @@ export function useRecording(): UseRecordingReturn {
         if (audioContextRef.current) {
           audioContextRef.current.close();
           audioContextRef.current = null;
+        }
+        if (hiddenVideoContainerRef.current) {
+          hiddenVideoContainerRef.current.remove();
+          hiddenVideoContainerRef.current = null;
         }
 
         // Create blob from chunks (fallback)
@@ -781,7 +882,6 @@ export function useRecording(): UseRecordingReturn {
       setStatus('recording');
 
       // Resume timer
-      const pauseEnd = Date.now();
       timerRef.current = window.setInterval(() => {
         const elapsed = Date.now() - startTimeRef.current - pausedDurationRef.current;
         setDuration(Math.floor(elapsed / 1000));

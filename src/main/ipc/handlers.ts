@@ -272,7 +272,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   });
 
   // Recording placeholders - will be implemented in Phase 2
-  ipcMain.handle('recording:start', async (_event, _options) => {
+  ipcMain.handle('recording:start', async () => {
     console.log('Recording start requested');
     // TODO: Implement in Phase 2
   });

@@ -300,7 +300,9 @@ export function VideoEditor({ recording, onClose, onSave }: VideoEditorProps) {
     if (!video) return;
 
     if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-      audioContextRef.current.resume().catch(() => {});
+      audioContextRef.current.resume().catch((error) => {
+        console.warn('Failed to resume audio context:', error);
+      });
     }
 
     if (isPlaying) {

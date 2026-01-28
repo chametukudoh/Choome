@@ -344,7 +344,7 @@ declare global {
         width?: number,
         height?: number
       ) => Promise<string>;
-      ffmpegGetMetadata: (videoPath: string) => Promise<any>;
+      ffmpegGetMetadata: (videoPath: string) => Promise<unknown>;
       ffmpegGenerateThumbnail: (videoPath: string, outputPath: string, timestamp?: number) => Promise<string>;
       onFFmpegProgress: (callback: (progress: number) => void) => () => void;
     };
