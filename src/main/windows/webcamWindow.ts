@@ -20,17 +20,19 @@ const SIZE_PRESETS = {
 export function createWebcamWindow(config?: Partial<WebcamConfig>): BrowserWindow {
   const storageService = getStorageService();
   const storedSettings = storageService.getSettings();
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const displayKey = String(primaryDisplay.id);
+  const storedDisplayPosition = storedSettings.webcam?.positionByDisplay?.[displayKey];
   const defaultConfig: WebcamConfig = {
     size: storedSettings.webcam?.size ?? 'medium',
     shape: storedSettings.webcam?.shape ?? 'circle',
-    position: storedSettings.webcam?.position ?? { x: 100, y: 100 },
+    position: storedDisplayPosition ?? storedSettings.webcam?.position ?? { x: 100, y: 100 },
   };
 
   const finalConfig = { ...defaultConfig, ...config };
   const { width, height } = SIZE_PRESETS[finalConfig.size];
 
   // Get primary display to calculate default position
-  const primaryDisplay = screen.getPrimaryDisplay();
   const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize;
 
   // Default position: bottom-right corner with 20px margin
@@ -79,10 +81,15 @@ export function createWebcamWindow(config?: Partial<WebcamConfig>): BrowserWindo
     const position = getWebcamPosition();
     if (!position) return;
     const settings = storageService.getSettings();
+    const activeDisplay = screen.getDisplayNearestPoint({ x: position.x, y: position.y });
     storageService.setSettings({
       webcam: {
         ...settings.webcam,
         position: { x: position.x, y: position.y },
+        positionByDisplay: {
+          ...(settings.webcam?.positionByDisplay ?? {}),
+          [String(activeDisplay.id)]: { x: position.x, y: position.y },
+        },
       },
     });
   });
@@ -99,6 +106,15 @@ export function closeWebcamWindow(): void {
     webcamWindow.close();
   }
   webcamWindow = null;
+}
+
+export function setWebcamVisible(visible: boolean): void {
+  if (!webcamWindow || webcamWindow.isDestroyed()) return;
+  if (visible) {
+    webcamWindow.showInactive();
+  } else {
+    webcamWindow.hide();
+  }
 }
 
 export function updateWebcamSize(size: 'small' | 'medium' | 'large'): void {
@@ -129,22 +145,20 @@ export function setWebcamPosition(x: number, y: number): void {
   webcamWindow.setPosition(x, y);
 }
 
-export function getWebcamOverlayConfig(displayId?: string): { x: number; y: number; width: number; height: number; shape: WebcamConfig['shape'] } | null {
+export function getWebcamOverlayConfig(displayId?: string): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  shape: WebcamConfig['shape'];
+  displayWidth?: number;
+  displayHeight?: number;
+} | null {
   const settings = getStorageService().getSettings();
   const sizeKey = settings.webcam?.size ?? 'medium';
   const sizePreset = SIZE_PRESETS[sizeKey];
-  const position = settings.webcam?.position ?? { x: 100, y: 100 };
-
-  const bounds = webcamWindow && !webcamWindow.isDestroyed()
-    ? webcamWindow.getBounds()
-    : {
-        x: position.x,
-        y: position.y,
-        width: sizePreset.width,
-        height: sizePreset.height,
-      };
   const displays = screen.getAllDisplays();
-  let targetDisplay = screen.getDisplayNearestPoint({ x: bounds.x, y: bounds.y });
+  let targetDisplay = screen.getPrimaryDisplay();
 
   if (displayId) {
     const match = displays.find((display) => String(display.id) === String(displayId));
@@ -152,6 +166,24 @@ export function getWebcamOverlayConfig(displayId?: string): { x: number; y: numb
       targetDisplay = match;
     }
   }
+
+  const displayKey = displayId ? String(displayId) : null;
+  const perDisplayPosition = displayKey
+    ? settings.webcam?.positionByDisplay?.[displayKey]
+    : undefined;
+  const defaultPosition = {
+    x: targetDisplay.bounds.x + Math.max(0, targetDisplay.bounds.width - sizePreset.width - 20),
+    y: targetDisplay.bounds.y + Math.max(0, targetDisplay.bounds.height - sizePreset.height - 20),
+  };
+  const fallbackPosition = displayId
+    ? defaultPosition
+    : settings.webcam?.position ?? defaultPosition;
+  const bounds = {
+    x: perDisplayPosition?.x ?? fallbackPosition.x,
+    y: perDisplayPosition?.y ?? fallbackPosition.y,
+    width: sizePreset.width,
+    height: sizePreset.height,
+  };
 
   const scaleFactor = targetDisplay.scaleFactor || 1;
   const offsetX = bounds.x - targetDisplay.bounds.x;
@@ -163,5 +195,7 @@ export function getWebcamOverlayConfig(displayId?: string): { x: number; y: numb
     width: Math.round(bounds.width * scaleFactor),
     height: Math.round(bounds.height * scaleFactor),
     shape: settings.webcam?.shape ?? 'circle',
+    displayWidth: Math.round(targetDisplay.bounds.width * scaleFactor),
+    displayHeight: Math.round(targetDisplay.bounds.height * scaleFactor),
   };
 }

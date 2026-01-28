@@ -67,6 +67,8 @@ export interface AppSettings {
     shape: 'circle' | 'rounded' | 'square';
     size: 'small' | 'medium' | 'large';
     position: { x: number; y: number };
+    positionByDisplay?: Record<string, { x: number; y: number }>;
+    positionBySource?: Record<string, { x: number; y: number }>;
     deviceId?: string | null;
   };
 }
@@ -86,6 +88,8 @@ export interface DisplayInfo {
   width: number;
   height: number;
   scaleFactor: number;
+  bounds: { x: number; y: number; width: number; height: number };
+  isPrimary: boolean;
 }
 
 // Media device types

@@ -1,10 +1,36 @@
 import ffmpeg from 'fluent-ffmpeg';
-import ffmpegPath from '@ffmpeg-installer/ffmpeg';
+import { app } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 
-// Set FFmpeg path
-ffmpeg.setFfmpegPath(ffmpegPath.path);
+const resolveFfmpegPath = (): string | null => {
+  try {
+    // Lazy require to avoid hard crash if the module or binary is missing in packaged builds.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg') as { path?: string };
+    let binaryPath = ffmpegInstaller?.path;
+    if (!binaryPath) {
+      return null;
+    }
+    if (app.isPackaged && binaryPath.includes('app.asar')) {
+      binaryPath = binaryPath.replace('app.asar', 'app.asar.unpacked');
+    }
+    return binaryPath;
+  } catch (error) {
+    console.warn('FFmpeg installer not available:', error);
+    return null;
+  }
+};
+
+// Set FFmpeg path (if available)
+try {
+  const ffmpegPath = resolveFfmpegPath();
+  if (ffmpegPath) {
+    ffmpeg.setFfmpegPath(ffmpegPath);
+  }
+} catch (error) {
+  console.warn('Failed to set FFmpeg path:', error);
+}
 
 const escapeDrawtextValue = (value: string) =>
   value.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'");

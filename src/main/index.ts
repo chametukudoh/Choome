@@ -3,6 +3,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import started from 'electron-squirrel-startup';
 import { registerIpcHandlers } from './ipc/handlers';
+import { closeWebcamWindow } from './windows/webcamWindow';
+import { closeOverlayWindow } from './windows/overlayWindow';
 import { getPreferredDisplaySourceId } from './services/DisplayMediaService';
 import { ShortcutsService } from './services/ShortcutsService';
 import { setShortcutsService } from './services/ShortcutsManager';
@@ -22,6 +24,28 @@ protocol.registerSchemesAsPrivileged([
     },
   },
 ]);
+
+const logMainError = (label: string, error: unknown) => {
+  try {
+    const logPath = path.join(app.getPath('userData'), 'main.log');
+    const message = [
+      `[${new Date().toISOString()}] ${label}`,
+      error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error),
+      '',
+    ].join('\n');
+    fs.appendFileSync(logPath, message);
+  } catch {
+    // Ignore logging failures to avoid recursive crashes.
+  }
+};
+
+process.on('uncaughtException', (error) => {
+  logMainError('uncaughtException', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logMainError('unhandledRejection', reason);
+});
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -119,6 +143,11 @@ const createWindow = async () => {
   if (shouldOpenDevTools) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   }
+
+  mainWindow.on('close', () => {
+    closeWebcamWindow();
+    closeOverlayWindow();
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;

@@ -1,17 +1,34 @@
-import { useState, useEffect } from 'react';
-import type { AppSettings } from '../../../shared/types';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import type { AppSettings, DisplayInfo } from '../../../shared/types';
 import { useMediaDevices } from '../../hooks/useMediaDevices';
+
+const CAMERA_SIZE_PRESETS: Record<NonNullable<AppSettings['webcam']>['size'], number> = {
+  small: 150,
+  medium: 250,
+  large: 350,
+};
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [selectedFolder, setSelectedFolder] = useState('');
   const [isEditingShortcut, setIsEditingShortcut] = useState<string | null>(null);
   const [shortcutKeys, setShortcutKeys] = useState<string[]>([]);
+  const [displays, setDisplays] = useState<DisplayInfo[]>([]);
+  const [selectedDisplayId, setSelectedDisplayId] = useState<number | null>(null);
+  const [displaySize, setDisplaySize] = useState<{ width: number; height: number } | null>(null);
+  const [previewSize, setPreviewSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  const [previewPosition, setPreviewPosition] = useState<{ x: number; y: number } | null>(null);
+  const previewPositionRef = useRef<{ x: number; y: number } | null>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
+  const dragStateRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
   const { cameras, isLoadingDevices } = useMediaDevices();
 
   // Load settings on mount
   useEffect(() => {
     loadSettings();
+    loadDisplays();
   }, []);
 
   const loadSettings = async () => {
@@ -40,10 +57,190 @@ export function SettingsPage() {
 
   const updateWebcamSettings = async (updates: Partial<AppSettings['webcam']>) => {
     if (!settings) return;
-    const updatedWebcam = { ...settings.webcam, ...updates };
+    const updatedWebcam = {
+      ...settings.webcam,
+      ...updates,
+      position: updates.position ?? settings.webcam.position,
+      positionByDisplay: {
+        ...(settings.webcam.positionByDisplay ?? {}),
+        ...(updates.positionByDisplay ?? {}),
+      },
+      positionBySource: {
+        ...(settings.webcam.positionBySource ?? {}),
+        ...(updates.positionBySource ?? {}),
+      },
+    };
     const updatedSettings = { ...settings, webcam: updatedWebcam };
     setSettings(updatedSettings);
     await window.electronAPI?.setSettings({ webcam: updatedWebcam });
+  };
+
+  const loadDisplays = async () => {
+    const displays = await window.electronAPI?.getDisplays();
+    if (!displays || displays.length === 0) return;
+    const typedDisplays = displays as DisplayInfo[];
+    setDisplays(typedDisplays);
+    if (selectedDisplayId === null) {
+      const primary = typedDisplays.find((display) => display.isPrimary) ?? typedDisplays[0];
+      if (primary) {
+        setSelectedDisplayId(primary.id);
+      }
+    }
+  };
+
+  const webcamSize = settings?.webcam?.size ?? 'medium';
+  const sizePreset = CAMERA_SIZE_PRESETS[webcamSize];
+
+  const activeDisplay = useMemo(() => {
+    if (!displays.length) return null;
+    return displays.find((display) => display.id === selectedDisplayId)
+      ?? displays.find((display) => display.isPrimary)
+      ?? displays[0];
+  }, [displays, selectedDisplayId]);
+
+  useEffect(() => {
+    if (!activeDisplay) return;
+    setDisplaySize({ width: activeDisplay.width, height: activeDisplay.height });
+  }, [activeDisplay]);
+
+  const previewMetrics = useMemo(() => {
+    if (!displaySize || previewSize.width === 0 || previewSize.height === 0) return null;
+    const scaleX = previewSize.width / displaySize.width;
+    const scaleY = previewSize.height / displaySize.height;
+    const scale = Math.min(scaleX, scaleY);
+    const bubbleSize = Math.max(16, Math.round(sizePreset * scale));
+    return {
+      scaleX,
+      scaleY,
+      bubbleSize,
+      maxX: Math.max(0, previewSize.width - bubbleSize),
+      maxY: Math.max(0, previewSize.height - bubbleSize),
+    };
+  }, [displaySize, previewSize, sizePreset]);
+
+  useEffect(() => {
+    previewPositionRef.current = previewPosition;
+  }, [previewPosition]);
+
+  useEffect(() => {
+    if (!displaySize) return;
+    const updatePreviewSize = () => {
+      if (!previewRef.current) return;
+      const width = previewRef.current.clientWidth;
+      if (!width) return;
+      const height = Math.round(width * (displaySize.height / displaySize.width));
+      setPreviewSize({ width, height });
+    };
+    updatePreviewSize();
+    window.addEventListener('resize', updatePreviewSize);
+    return () => window.removeEventListener('resize', updatePreviewSize);
+  }, [displaySize]);
+
+  useEffect(() => {
+    if (!settings || !previewMetrics) return;
+    const displayKey = activeDisplay ? String(activeDisplay.id) : null;
+    const position = displayKey
+      ? settings.webcam?.positionByDisplay?.[displayKey] ?? settings.webcam?.position ?? { x: 20, y: 20 }
+      : settings.webcam?.position ?? { x: 20, y: 20 };
+    const x = clamp(Math.round(position.x * previewMetrics.scaleX), 0, previewMetrics.maxX);
+    const y = clamp(Math.round(position.y * previewMetrics.scaleY), 0, previewMetrics.maxY);
+    setPreviewPosition({ x, y });
+  }, [settings, previewMetrics, activeDisplay]);
+
+  const commitPreviewPosition = async () => {
+    if (!previewMetrics || !previewPositionRef.current) return;
+    const { scaleX, scaleY } = previewMetrics;
+    const rawX = Math.round(previewPositionRef.current.x / scaleX);
+    const rawY = Math.round(previewPositionRef.current.y / scaleY);
+    const maxX = Math.max(0, Math.round((displaySize?.width ?? 0) - sizePreset));
+    const maxY = Math.max(0, Math.round((displaySize?.height ?? 0) - sizePreset));
+    const displayKey = activeDisplay ? String(activeDisplay.id) : null;
+    const position = {
+      x: clamp(rawX, 0, maxX),
+      y: clamp(rawY, 0, maxY),
+    };
+    await updateWebcamSettings({
+      position,
+      positionByDisplay: displayKey ? { [displayKey]: position } : undefined,
+    });
+  };
+
+  useEffect(() => {
+    if (!previewMetrics) return;
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!dragStateRef.current) return;
+      event.preventDefault();
+      const { startX, startY, originX, originY } = dragStateRef.current;
+      const nextX = clamp(originX + event.clientX - startX, 0, previewMetrics.maxX);
+      const nextY = clamp(originY + event.clientY - startY, 0, previewMetrics.maxY);
+      setPreviewPosition({ x: nextX, y: nextY });
+    };
+
+    const handlePointerUp = () => {
+      if (!dragStateRef.current) return;
+      dragStateRef.current = null;
+      commitPreviewPosition();
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [previewMetrics]);
+
+  const handlePreviewPointerDown = (event: React.PointerEvent) => {
+    if (!previewPosition) return;
+    event.preventDefault();
+    dragStateRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: previewPosition.x,
+      originY: previewPosition.y,
+    };
+  };
+
+  const handlePositionInput = (axis: 'x' | 'y', value: number) => {
+    if (!settings) return;
+    const safeValue = Number.isFinite(value) ? Math.round(value) : 0;
+    const maxX = Math.max(0, (displaySize?.width ?? safeValue) - sizePreset);
+    const maxY = Math.max(0, (displaySize?.height ?? safeValue) - sizePreset);
+    const nextPosition = {
+      x: clamp(axis === 'x' ? safeValue : settings.webcam.position.x, 0, maxX),
+      y: clamp(axis === 'y' ? safeValue : settings.webcam.position.y, 0, maxY),
+    };
+    const displayKey = activeDisplay ? String(activeDisplay.id) : null;
+    updateWebcamSettings({
+      position: nextPosition,
+      positionByDisplay: displayKey ? { [displayKey]: nextPosition } : undefined,
+    });
+  };
+
+  const handleResetPosition = () => {
+    if (!displaySize) {
+      updateWebcamSettings({ position: { x: 20, y: 20 } });
+      return;
+    }
+    const x = Math.max(0, displaySize.width - sizePreset - 20);
+    const y = Math.max(0, displaySize.height - sizePreset - 20);
+    const displayKey = activeDisplay ? String(activeDisplay.id) : null;
+    updateWebcamSettings({
+      position: { x, y },
+      positionByDisplay: displayKey ? { [displayKey]: { x, y } } : undefined,
+    });
+  };
+
+  const getShapeClass = () => {
+    switch (settings?.webcam?.shape) {
+      case 'rounded':
+        return 'rounded-2xl';
+      case 'square':
+        return 'rounded-none';
+      case 'circle':
+      default:
+        return 'rounded-full';
+    }
   };
 
   const handleShortcutEdit = (shortcutKey: 'startStop' | 'pause' | 'drawing') => {
@@ -175,6 +372,22 @@ export function SettingsPage() {
         <div className="card p-4">
           <h2 className="font-semibold mb-4">Webcam</h2>
           <div className="space-y-3">
+            {displays.length > 1 && (
+              <div>
+                <label className="text-xs text-dark-400 mb-1 block">Display</label>
+                <select
+                  className="select w-full"
+                  value={activeDisplay?.id ?? ''}
+                  onChange={(e) => setSelectedDisplayId(Number(e.target.value))}
+                >
+                  {displays.map((display) => (
+                    <option key={display.id} value={display.id}>
+                      {display.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <label className="text-xs text-dark-400 mb-1 block">Default Camera</label>
               <select
@@ -217,6 +430,59 @@ export function SettingsPage() {
                   <option value="square">Square</option>
                 </select>
               </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-dark-400 mb-1 block">Position X (px)</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={settings.webcam.position.x}
+                  onChange={(e) => handlePositionInput('x', Number(e.target.value))}
+                  className="input w-full text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-dark-400 mb-1 block">Position Y (px)</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={settings.webcam.position.y}
+                  onChange={(e) => handlePositionInput('y', Number(e.target.value))}
+                  className="input w-full text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs text-dark-500">
+                Drag the preview bubble to set the default webcam position.
+              </p>
+              <button className="btn btn-secondary text-xs" onClick={handleResetPosition}>
+                Reset position
+              </button>
+            </div>
+
+            <div
+              ref={previewRef}
+              className="relative w-full rounded-lg border border-dark-800 bg-dark-950/60 overflow-hidden"
+              style={{ height: previewSize.height || 180 }}
+            >
+              <div className="absolute inset-0 bg-gradient-to-br from-dark-900/60 via-transparent to-dark-900/60" />
+              {previewPosition && previewMetrics && (
+                <div
+                  className={`absolute border border-white/40 bg-white/10 shadow-lg cursor-grab active:cursor-grabbing ${getShapeClass()}`}
+                  style={{
+                    width: previewMetrics.bubbleSize,
+                    height: previewMetrics.bubbleSize,
+                    left: previewPosition.x,
+                    top: previewPosition.y,
+                  }}
+                  onPointerDown={handlePreviewPointerDown}
+                  aria-label="Drag to reposition webcam preview"
+                />
+              )}
             </div>
           </div>
         </div>

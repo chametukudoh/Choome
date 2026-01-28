@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { SourceSelector } from './components/SourceSelector';
 import { RecordingControls, RecordingTimer } from './components/RecordingControls';
 import { AudioControls } from './components/AudioControls';
@@ -7,6 +7,15 @@ import { DrawingOverlay } from './components/DrawingTools';
 import { RecordingList } from './components/Library';
 import { SettingsPage } from './components/Settings';
 import { useRecordingStore } from './stores/recordingStore';
+import type { AppSettings, DisplayInfo } from '../shared/types';
+
+const CAMERA_SIZE_PRESETS: Record<NonNullable<AppSettings['webcam']>['size'], number> = {
+  small: 150,
+  medium: 250,
+  large: 350,
+};
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
 type Tab = 'record' | 'library' | 'settings';
 
@@ -156,6 +165,19 @@ function NavButton({
 function RecordPage() {
   const [showSourceSelector, setShowSourceSelector] = useState(false);
   const [showAudioPanel, setShowAudioPanel] = useState(false);
+  const [showPipPreview, setShowPipPreview] = useState(() => {
+    const stored = window.localStorage.getItem('choome:showPipPreview');
+    return stored ? stored === 'true' : true;
+  });
+  const [webcamSettings, setWebcamSettings] = useState<AppSettings['webcam'] | null>(null);
+  const [displays, setDisplays] = useState<DisplayInfo[]>([]);
+  const [previewSize, setPreviewSize] = useState({ width: 0, height: 0 });
+  const [imageAspect, setImageAspect] = useState<number | null>(null);
+  const [dragPosition, setDragPosition] = useState<{ x: number; y: number } | null>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
+  const pipRef = useRef<HTMLDivElement>(null);
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
+  const dragPositionRef = useRef<{ x: number; y: number } | null>(null);
   const {
     status,
     selectedSource,
@@ -167,6 +189,195 @@ function RecordPage() {
   const isRecording = status === 'recording' || status === 'paused';
   const isProcessing = status === 'processing';
   const isBusy = isRecording || isProcessing;
+
+  useEffect(() => {
+    const loadSettings = async () => {
+      const settings = await window.electronAPI?.getSettings();
+      if (settings?.webcam) {
+        setWebcamSettings(settings.webcam);
+      }
+    };
+    const loadDisplays = async () => {
+      const loadedDisplays = await window.electronAPI?.getDisplays();
+      if (loadedDisplays) {
+        setDisplays(loadedDisplays as DisplayInfo[]);
+      }
+    };
+    loadSettings();
+    loadDisplays();
+    const handleFocus = () => loadSettings();
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedSource) return;
+    window.electronAPI?.getSettings().then((settings) => {
+      if (settings?.webcam) {
+        setWebcamSettings(settings.webcam);
+      }
+    });
+  }, [selectedSource?.id]);
+
+
+  useEffect(() => {
+    window.localStorage.setItem('choome:showPipPreview', String(showPipPreview));
+  }, [showPipPreview]);
+
+  useEffect(() => {
+    if (!previewRef.current) return;
+    const element = previewRef.current;
+    const updateSize = () => {
+      setPreviewSize({ width: element.clientWidth, height: element.clientHeight });
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const activeDisplay = useMemo(() => {
+    if (selectedSource?.display_id) {
+      const match = displays.find((display) => String(display.id) === String(selectedSource.display_id));
+      if (match) return match;
+    }
+    if (selectedSource?.name) {
+      const match = selectedSource.name.match(/Screen\s+(\d+)/i);
+      if (match) {
+        const index = Math.max(0, Number(match[1]) - 1);
+        if (displays[index]) {
+          return displays[index];
+        }
+      }
+    }
+    return displays.find((display) => display.isPrimary) ?? displays[0];
+  }, [displays, selectedSource?.display_id, selectedSource?.name]);
+
+  const displayBounds = activeDisplay?.bounds ?? { x: 0, y: 0, width: 1920, height: 1080 };
+  const displayWidth = displayBounds.width || 1920;
+  const displayHeight = displayBounds.height || 1080;
+  const webcamSizeKey = webcamSettings?.size ?? 'medium';
+  const webcamSize = CAMERA_SIZE_PRESETS[webcamSizeKey];
+
+  const imageRect = useMemo(() => {
+    if (!selectedSource?.thumbnail || !imageAspect || !previewSize.width || !previewSize.height) {
+      return { x: 0, y: 0, width: previewSize.width, height: previewSize.height };
+    }
+    const containerAspect = previewSize.width / previewSize.height;
+    if (imageAspect > containerAspect) {
+      const width = previewSize.width;
+      const height = width / imageAspect;
+      return { x: 0, y: (previewSize.height - height) / 2, width, height };
+    }
+    const height = previewSize.height;
+    const width = height * imageAspect;
+    return { x: (previewSize.width - width) / 2, y: 0, width, height };
+  }, [imageAspect, previewSize.width, previewSize.height, selectedSource?.thumbnail]);
+
+  const previewBaseRect = selectedSource?.thumbnail
+    ? imageRect
+    : { x: 0, y: 0, width: previewSize.width, height: previewSize.height };
+
+  const previewPipWidth = previewBaseRect.width
+    ? Math.max(24, Math.round((webcamSize / displayWidth) * previewBaseRect.width))
+    : 0;
+  const previewPipHeight = previewBaseRect.height
+    ? Math.max(24, Math.round((webcamSize / displayHeight) * previewBaseRect.height))
+    : 0;
+  const previewMaxX = Math.max(0, previewBaseRect.width - previewPipWidth);
+  const previewMaxY = Math.max(0, previewBaseRect.height - previewPipHeight);
+  const storedSourcePosition = selectedSource?.id
+    ? webcamSettings?.positionBySource?.[selectedSource.id]
+    : undefined;
+  const previewPipLeft = previewBaseRect.width
+    ? (dragPosition?.x ?? (storedSourcePosition ? Math.round(storedSourcePosition.x * previewMaxX) : 0)) + previewBaseRect.x
+    : 0;
+  const previewPipTop = previewBaseRect.height
+    ? (dragPosition?.y ?? (storedSourcePosition ? Math.round(storedSourcePosition.y * previewMaxY) : 0)) + previewBaseRect.y
+    : 0;
+
+  useEffect(() => {
+    if (!selectedSource?.id || !dragPosition) return;
+    if (previewMaxX === 0 || previewMaxY === 0) return;
+    const ratioX = clamp(dragPosition.x / previewMaxX, 0, 1);
+    const ratioY = clamp(dragPosition.y / previewMaxY, 0, 1);
+    applySourcePosition(ratioX, ratioY);
+    setDragPosition(null);
+    dragPositionRef.current = null;
+  }, [selectedSource?.id, dragPosition, previewMaxX, previewMaxY]);
+
+  const applySourcePosition = async (ratioX: number, ratioY: number) => {
+    if (!webcamSettings || !selectedSource?.id) return;
+    const updatedWebcam: AppSettings['webcam'] = {
+      ...webcamSettings,
+      positionBySource: {
+        ...(webcamSettings.positionBySource ?? {}),
+        [selectedSource.id]: { x: ratioX, y: ratioY },
+      },
+    };
+    await window.electronAPI?.setSettings({ webcam: updatedWebcam });
+    setWebcamSettings(updatedWebcam);
+  };
+
+  const handlePipPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!previewRef.current || !pipRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const pipRect = pipRef.current.getBoundingClientRect();
+    dragOffsetRef.current = {
+      x: event.clientX - pipRect.left,
+      y: event.clientY - pipRect.top,
+    };
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (!previewRef.current) return;
+      const previewRect = previewRef.current.getBoundingClientRect();
+      const maxX = Math.max(0, previewBaseRect.width - previewPipWidth);
+      const maxY = Math.max(0, previewBaseRect.height - previewPipHeight);
+      const nextX = clamp(
+        moveEvent.clientX - previewRect.left - previewBaseRect.x - dragOffsetRef.current.x,
+        0,
+        maxX
+      );
+      const nextY = clamp(
+        moveEvent.clientY - previewRect.top - previewBaseRect.y - dragOffsetRef.current.y,
+        0,
+        maxY
+      );
+      const next = { x: nextX, y: nextY };
+      dragPositionRef.current = next;
+      setDragPosition(next);
+      if (selectedSource?.id) {
+        const ratioX = previewMaxX ? next.x / previewMaxX : 0;
+        const ratioY = previewMaxY ? next.y / previewMaxY : 0;
+        window.dispatchEvent(new CustomEvent('webcam:position', { detail: { x: ratioX, y: ratioY } }));
+      }
+    };
+
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      const finalPosition = dragPositionRef.current ?? dragPosition;
+      if (!selectedSource?.id) {
+        if (finalPosition) {
+          setDragPosition(finalPosition);
+          dragPositionRef.current = finalPosition;
+        }
+        return;
+      }
+      if (finalPosition) {
+        const ratioX = previewMaxX ? finalPosition.x / previewMaxX : 0;
+        const ratioY = previewMaxY ? finalPosition.y / previewMaxY : 0;
+        applySourcePosition(ratioX, ratioY);
+        window.dispatchEvent(new CustomEvent('webcam:position', { detail: { x: ratioX, y: ratioY } }));
+      }
+      setDragPosition(null);
+      dragPositionRef.current = null;
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  };
 
   // Set up keyboard shortcut listeners
   useEffect(() => {
@@ -245,32 +456,56 @@ function RecordPage() {
             : 'cursor-pointer hover:border-primary-500 transition-colors border-2 border-dashed border-dark-600'
         }`}
       >
-        {selectedSource?.thumbnail ? (
-          <div className="relative w-full h-full">
+        <div ref={previewRef} className="relative w-full h-full">
+          {selectedSource?.thumbnail ? (
             <img
               src={selectedSource.thumbnail}
               alt={selectedSource.name}
               className="w-full h-full object-contain bg-dark-950"
+              onLoad={(event) => {
+                const target = event.currentTarget;
+                if (target.naturalWidth && target.naturalHeight) {
+                  setImageAspect(target.naturalWidth / target.naturalHeight);
+                }
+              }}
             />
-            {isRecording && (
-              <div className="absolute top-4 left-4 flex items-center gap-2 bg-dark-900/80 px-3 py-1 rounded-full">
-                <RecordingTimer />
+          ) : (
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-dark-500">
+              <ScreenIcon className="w-16 h-16 mb-2" />
+              <p>Click to select screen or window</p>
+            </div>
+          )}
+          {includeWebcam && showPipPreview && webcamSettings && previewPipWidth > 0 && previewPipHeight > 0 && (
+            <div
+              ref={pipRef}
+              onPointerDown={handlePipPointerDown}
+              onClick={(event) => event.stopPropagation()}
+              className="absolute border-2 border-white/60 bg-white/10 backdrop-blur-[2px] shadow-lg rounded-2xl cursor-move"
+              style={{
+                left: previewPipLeft,
+                top: previewPipTop,
+                width: previewPipWidth,
+                height: previewPipHeight,
+              }}
+            >
+              <div className="absolute inset-x-0 bottom-1 text-center text-[10px] text-white/80">
+                Drag to position
               </div>
-            )}
-            {!isBusy && (
-              <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center">
-                <span className="bg-primary-600 text-white px-4 py-2 rounded-lg font-medium">
-                  Change Source
-                </span>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="text-center text-dark-500">
-            <ScreenIcon className="w-16 h-16 mx-auto mb-2" />
-            <p>Click to select screen or window</p>
-          </div>
-        )}
+            </div>
+          )}
+          {selectedSource?.thumbnail && isRecording && (
+            <div className="absolute top-4 left-4 flex items-center gap-2 bg-dark-900/80 px-3 py-1 rounded-full">
+              <RecordingTimer />
+            </div>
+          )}
+          {selectedSource?.thumbnail && !isBusy && (
+            <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center">
+              <span className="bg-primary-600 text-white px-4 py-2 rounded-lg font-medium">
+                Change Source
+              </span>
+            </div>
+          )}
+        </div>
       </button>
 
       {/* Recording controls */}
@@ -296,6 +531,29 @@ function RecordPage() {
         >
           <CameraIcon className="w-5 h-5" />
         </button>
+
+        <button
+          onClick={() => setShowPipPreview((prev) => !prev)}
+          disabled={isBusy || !includeWebcam}
+          className={`px-2 py-2 rounded-lg text-xs font-semibold transition-colors ${
+            isBusy || !includeWebcam
+              ? 'opacity-50 cursor-not-allowed bg-dark-800 text-dark-500'
+              : showPipPreview
+              ? 'bg-primary-600/20 text-primary-300 hover:bg-primary-600/30'
+              : 'bg-dark-800 text-dark-400 hover:text-white hover:bg-dark-700'
+          }`}
+          title={showPipPreview ? 'Hide PiP preview' : 'Show PiP preview'}
+        >
+          PiP
+        </button>
+        {!isBusy && includeWebcam && (
+          <div className="relative group">
+            <InfoIcon className="w-4 h-4 text-dark-500 group-hover:text-dark-300" />
+            <div className="pointer-events-none absolute left-1/2 top-full z-10 mt-2 w-44 -translate-x-1/2 rounded-md bg-dark-800 px-2 py-1 text-[11px] text-dark-100 opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+              Toggle the PiP preview overlay on the source preview.
+            </div>
+          </div>
+        )}
 
         {/* Audio settings button */}
         <button
@@ -357,6 +615,16 @@ function CloseIcon() {
   return (
     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+      <circle cx="12" cy="12" r="9" strokeWidth={2} />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 7h.01" />
     </svg>
   );
 }

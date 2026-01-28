@@ -12,6 +12,7 @@ import { RecordingRecoveryService } from '../services/RecordingRecoveryService';
 import {
   createWebcamWindow,
   closeWebcamWindow,
+  setWebcamVisible,
   updateWebcamSize,
   getWebcamPosition,
   setWebcamPosition,
@@ -43,6 +44,42 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
 
   ipcMain.handle('window:close', () => {
     mainWindow.close();
+  });
+
+  ipcMain.handle('window:moveOffDisplay', (_event, displayId?: number) => {
+    const currentBounds = mainWindow.getBounds();
+    const displays = screen.getAllDisplays();
+    const target = typeof displayId === 'number'
+      ? displays.find((display) => display.id !== displayId)
+      : undefined;
+    const capturedDisplay = typeof displayId === 'number'
+      ? displays.find((display) => display.id === displayId)
+      : undefined;
+
+    if (target) {
+      mainWindow.setBounds({
+        ...currentBounds,
+        x: target.workArea.x + 50,
+        y: target.workArea.y + 50,
+      });
+      return currentBounds;
+    }
+
+    if (capturedDisplay) {
+      mainWindow.setBounds({
+        ...currentBounds,
+        x: capturedDisplay.workArea.x + capturedDisplay.workArea.width + 50,
+        y: capturedDisplay.workArea.y + 50,
+      });
+      return currentBounds;
+    }
+
+    return null;
+  });
+
+  ipcMain.handle('window:restoreBounds', (_event, bounds?: Electron.Rectangle | null) => {
+    if (!bounds) return;
+    mainWindow.setBounds(bounds);
   });
 
   // Screen sources - simplified to help diagnose issues
@@ -110,12 +147,15 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   });
 
   ipcMain.handle('displays:get', () => {
+    const primaryId = screen.getPrimaryDisplay().id;
     return screen.getAllDisplays().map((display, index) => ({
       id: display.id,
       name: display.label || `Display ${index + 1}`,
       width: display.size.width,
       height: display.size.height,
       scaleFactor: display.scaleFactor,
+      bounds: display.bounds,
+      isPrimary: display.id === primaryId,
     }));
   });
 
@@ -333,6 +373,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
 
   ipcMain.handle('webcam:close', () => {
     closeWebcamWindow();
+  });
+
+  ipcMain.handle('webcam:setVisible', (_event, visible: boolean) => {
+    setWebcamVisible(visible);
   });
 
   ipcMain.handle('webcam:updateSize', (_event, size: 'small' | 'medium' | 'large') => {

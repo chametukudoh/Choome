@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
+  moveWindowOffDisplay: (displayId?: number) => ipcRenderer.invoke('window:moveOffDisplay', displayId),
+  restoreWindowBounds: (bounds?: { x: number; y: number; width: number; height: number } | null) =>
+    ipcRenderer.invoke('window:restoreBounds', bounds),
 
   // Screen capture
   getSources: () => ipcRenderer.invoke('sources:get'),
@@ -51,6 +54,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Webcam window
   openWebcam: (config?: WebcamConfig) => ipcRenderer.invoke('webcam:open', config),
   closeWebcam: () => ipcRenderer.invoke('webcam:close'),
+  setWebcamVisible: (visible: boolean) => ipcRenderer.invoke('webcam:setVisible', visible),
   updateWebcamSize: (size: 'small' | 'medium' | 'large') => ipcRenderer.invoke('webcam:updateSize', size),
   getWebcamPosition: () => ipcRenderer.invoke('webcam:getPosition'),
   setWebcamPosition: (x: number, y: number) => ipcRenderer.invoke('webcam:setPosition', x, y),
@@ -234,6 +238,8 @@ declare global {
       minimizeWindow: () => Promise<void>;
       maximizeWindow: () => Promise<void>;
       closeWindow: () => Promise<void>;
+      moveWindowOffDisplay: (displayId?: number) => Promise<{ x: number; y: number; width: number; height: number } | null>;
+      restoreWindowBounds: (bounds?: { x: number; y: number; width: number; height: number } | null) => Promise<void>;
       getSources: () => Promise<Electron.DesktopCapturerSource[]>;
       getDisplays: () => Promise<{ id: number; name: string; width: number; height: number; scaleFactor: number }[]>;
       setPreferredSource: (sourceId: string | null) => Promise<void>;
@@ -260,10 +266,19 @@ declare global {
       setSettings: (settings: DeepPartial<AppSettings>) => Promise<void>;
       openWebcam: (config?: WebcamConfig) => Promise<void>;
       closeWebcam: () => Promise<void>;
+      setWebcamVisible: (visible: boolean) => Promise<void>;
       updateWebcamSize: (size: 'small' | 'medium' | 'large') => Promise<void>;
       getWebcamPosition: () => Promise<{ x: number; y: number; width: number; height: number } | null>;
       setWebcamPosition: (x: number, y: number) => Promise<void>;
-      getWebcamOverlayConfig: (displayId?: string) => Promise<{ x: number; y: number; width: number; height: number; shape: 'circle' | 'rounded' | 'square' } | null>;
+      getWebcamOverlayConfig: (displayId?: string) => Promise<{
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        shape: 'circle' | 'rounded' | 'square';
+        displayWidth?: number;
+        displayHeight?: number;
+      } | null>;
       openOverlay: () => Promise<void>;
       closeOverlay: () => Promise<void>;
       setOverlayClickThrough: (enabled: boolean) => Promise<void>;

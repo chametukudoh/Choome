@@ -57,6 +57,7 @@ export function useRecording(): UseRecordingReturn {
   const pausedDurationRef = useRef<number>(0);
   const webcamHiddenRef = useRef<boolean>(false);
   const mainWindowBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const livePositionRef = useRef<{ x: number; y: number } | null>(null);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -117,6 +118,19 @@ export function useRecording(): UseRecordingReturn {
     }
   }, [setAvailableSources]);
 
+  useEffect(() => {
+    const handlePosition = (event: Event) => {
+      const detail = (event as CustomEvent<{ x: number; y: number }>).detail;
+      if (!detail) return;
+      livePositionRef.current = {
+        x: Math.min(Math.max(detail.x, 0), 1),
+        y: Math.min(Math.max(detail.y, 0), 1),
+      };
+    };
+    window.addEventListener('webcam:position', handlePosition as EventListener);
+    return () => window.removeEventListener('webcam:position', handlePosition as EventListener);
+  }, []);
+
   // Start recording
   const startRecording = useCallback(async () => {
     if (!selectedSource) {
@@ -137,12 +151,12 @@ export function useRecording(): UseRecordingReturn {
       const shouldHideWebcamWindow = includeWebcam && selectedSource.id.startsWith('screen:');
       if (shouldHideWebcamWindow) {
         if (resolvedDisplayId) {
-          const movedBounds = await window.electronAPI?.moveWindowOffDisplay(Number(resolvedDisplayId));
+          const movedBounds = await window.electronAPI?.moveWindowOffDisplay?.(Number(resolvedDisplayId));
           if (movedBounds) {
             mainWindowBoundsRef.current = movedBounds;
           }
         }
-        await window.electronAPI?.setWebcamVisible(false);
+        await window.electronAPI?.setWebcamVisible?.(false);
         await window.electronAPI?.closeWebcam();
         webcamHiddenRef.current = true;
       }
@@ -315,11 +329,13 @@ export function useRecording(): UseRecordingReturn {
                 pipY = Math.min(Math.max(adjustedOverlayConfig.y, 0), canvasHeight - pipHeight);
               }
 
-              if (sourcePosition) {
+              const livePosition = livePositionRef.current;
+              const effectivePosition = livePosition ?? sourcePosition;
+              if (effectivePosition) {
                 const maxX = Math.max(0, canvasWidth - pipWidth);
                 const maxY = Math.max(0, canvasHeight - pipHeight);
-                pipX = Math.min(Math.max(Math.round(sourcePosition.x * maxX), 0), maxX);
-                pipY = Math.min(Math.max(Math.round(sourcePosition.y * maxY), 0), maxY);
+                pipX = Math.min(Math.max(Math.round(effectivePosition.x * maxX), 0), maxX);
+                pipY = Math.min(Math.max(Math.round(effectivePosition.y * maxY), 0), maxY);
               }
               const borderWidth = Math.max(2, Math.round(canvasWidth * 0.003));
               const cornerRadius = Math.round(Math.min(pipWidth, pipHeight) * 0.18);
@@ -584,15 +600,15 @@ export function useRecording(): UseRecordingReturn {
       toast({
         type: 'error',
         title: 'Recording failed',
-        message: 'Please check permissions and try again.',
+        message: error instanceof Error ? error.message : String(error),
       });
       if (webcamHiddenRef.current) {
         await window.electronAPI?.openWebcam();
-        await window.electronAPI?.setWebcamVisible(true);
+        await window.electronAPI?.setWebcamVisible?.(true);
         webcamHiddenRef.current = false;
       }
       if (mainWindowBoundsRef.current) {
-        await window.electronAPI?.restoreWindowBounds(mainWindowBoundsRef.current);
+        await window.electronAPI?.restoreWindowBounds?.(mainWindowBoundsRef.current);
         mainWindowBoundsRef.current = null;
       }
       setStatus('idle');
@@ -628,11 +644,11 @@ export function useRecording(): UseRecordingReturn {
       mediaRecorderRef.current.onstop = async () => {
         if (webcamHiddenRef.current) {
           await window.electronAPI?.openWebcam();
-          await window.electronAPI?.setWebcamVisible(true);
+          await window.electronAPI?.setWebcamVisible?.(true);
           webcamHiddenRef.current = false;
         }
         if (mainWindowBoundsRef.current) {
-          await window.electronAPI?.restoreWindowBounds(mainWindowBoundsRef.current);
+          await window.electronAPI?.restoreWindowBounds?.(mainWindowBoundsRef.current);
           mainWindowBoundsRef.current = null;
         }
         // Stop timer

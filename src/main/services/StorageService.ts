@@ -77,6 +77,8 @@ export class StorageService {
         shape: 'circle',
         size: 'medium',
         position: { x: 20, y: 20 },
+        positionByDisplay: {},
+        positionBySource: {},
         deviceId: null,
       },
     };
@@ -162,15 +164,23 @@ export class StorageService {
         ...current.shortcuts,
         ...(settings.shortcuts ?? {}),
       },
-      webcam: {
-        ...current.webcam,
-        ...(settings.webcam ?? {}),
-        position: {
-          ...current.webcam.position,
-          ...(settings.webcam?.position ?? {}),
+        webcam: {
+          ...current.webcam,
+          ...(settings.webcam ?? {}),
+          position: {
+            ...current.webcam.position,
+            ...(settings.webcam?.position ?? {}),
+          },
+          positionByDisplay: {
+            ...(current.webcam.positionByDisplay ?? {}),
+            ...(settings.webcam?.positionByDisplay ?? {}),
+          },
+          positionBySource: {
+            ...(current.webcam.positionBySource ?? {}),
+            ...(settings.webcam?.positionBySource ?? {}),
+          },
         },
-      },
-    };
+      };
     this.store.set('settings', updated);
 
     // If storage path changed, ensure new directory exists
